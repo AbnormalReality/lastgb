@@ -1,0 +1,96 @@
+name: ci
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+jobs:
+  golangci:
+    name: lint
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v2
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v2
+        with:
+          version: v1.39
+
+  test:
+    needs: [golangci]
+    strategy:
+      matrix:
+        go-version: [1.16.x]
+        os: [ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Install Go
+        uses: actions/setup-go@v2
+        with:
+          go-version: ${{ matrix.go-version }}
+      - name: Checkout code
+        uses: actions/checkout@v2
+      - name: Unit tests
+        run: go test ./... -v -covermode=count
+
+  integration:
+    needs: [test]
+    strategy:
+      matrix:
+        go-version: [1.16.x]
+        os: [ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v2
+      - name: Install Go
+        uses: actions/setup-go@v2
+        with:
+          go-version: ${{ matrix.go-version }}
+      - name: Build
+        run: go build -o ./rest
+      - name: Run the API and integration tests
+        run: |
+          ./rest &
+          sleep 1
+          go test ./...  -v -covermode=count -tags integration
+  build:
+    needs: [golangci, test, integration]
+    strategy:
+      matrix:
+        go-version: [1.16.x]
+        os: [ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v2
+
+      - name: Set up Go
+        uses: actions/setup-go@v2
+        with:
+          go-version: ${{ matrix.go-version }}
+
+      - name: Build
+        run: go build -o ./rest
+
+  variables:
+    DOCKER_DRIVER: overlay2
+    DOCKER_TLS_CERTDIR: ""
+    DOCKER_HOST: tcp://localhost:2375/
+  image: cr.yandex/yc/metadata-token-docker-helper:0.2
+  services:
+    - docker:19.03.1-dind
+  script:
+    - docker build . -t cr.yandex/<идентификатор реестра>/hello:gitlab-$CI_COMMIT_SHORT_SHA
+    - docker push cr.yandex/<идентификатор реестра>/hello:gitlab-$CI_COMMIT_SHORT_SHA
+
+deploy:
+needs: [golangci, test, integration, build]
+
+  image: gcr.io/cloud-builders/kubectl:latest
+  
+  script:
+    - kubectl config set-cluster k8s --server="$KUBE_URL" --insecure-skip-tls-verify=true
+    - kubectl config set-credentials admin --token="$KUBE_TOKEN"
+    - kubectl config set-context default --cluster=k8s --user=admin
+    - kubectl config use-context default
+    - sed -i "s/__VERSION__/gitlab-$CI_COMMIT_SHORT_SHA/" k8s-g3-sergeya-conf.yaml
+    - kubectl apply -f k8s-g3-sergeya-conf.yaml
